@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Математический помощник</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+  <style>
+    :root { --bg:#f6f7fb; --card:#fff; --text:#1c1f2a; --muted:#6b7080; --accent:#4f46e5; --border:#e3e5ee; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#12131a; --card:#1c1e28; --text:#e8e9ef; --muted:#9a9fb0; --accent:#818cf8; --border:#2c2f3d; }
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.6 system-ui, -apple-system, sans-serif; }
+    main { max-width:760px; margin:0 auto; padding:32px 16px; }
+    h1 { font-size:1.6rem; margin:0 0 4px; }
+    p.sub { color:var(--muted); margin:0 0 24px; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; }
+    textarea { width:100%; min-height:120px; resize:vertical; padding:12px; border:1px solid var(--border);
+      border-radius:8px; background:var(--bg); color:var(--text); font:inherit; }
+    .row { display:flex; gap:12px; align-items:center; margin-top:12px; flex-wrap:wrap; }
+    button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 20px; font:inherit; cursor:pointer; }
+    button:disabled { opacity:.6; cursor:wait; }
+    input[type=file] { color:var(--muted); font-size:.9rem; max-width:100%; }
+    #result { margin-top:20px; overflow-x:auto; }
+    #result:empty { display:none; }
+    .error { color:#dc2626; }
+    .katex-display { overflow-x:auto; overflow-y:hidden; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Математический помощник</h1>
+  <p class="sub">Напишите задачу или прикрепите фото — получите пошаговое решение.</p>
+  <form id="form" class="card">
+    <textarea name="problem" placeholder="Например: решите уравнение x^2 - 5x + 6 = 0"></textarea>
+    <div class="row">
+      <input type="file" name="image" accept="image/png,image/jpeg,image/gif,image/webp">
+      <button type="submit" id="btn">Решить</button>
+    </div>
+  </form>
+  <div id="result" class="card"></div>
+</main>
+<script>
+  const form = document.getElementById("form");
+  const btn = document.getElementById("btn");
+  const result = document.getElementById("result");
+
+  // Protect LaTeX from markdown parsing, then restore it for KaTeX.
+  function renderMarkdownWithMath(src) {
+    const math = [];
+    const stash = s => `@@MATH${math.push(s) - 1}@@`;
+    src = src.replace(/\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^$\n]+?\$/g, stash);
+    let html = marked.parse(src);
+    html = html.replace(/@@MATH(\d+)@@/g, (_, i) =>
+      math[i].replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"));
+    return html;
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    btn.disabled = true;
+    btn.textContent = "Решаю…";
+    result.innerHTML = "<span style='color:var(--muted)'>Думаю над решением…</span>";
+    try {
+      const res = await fetch("/api/solve", { method: "POST", body: new FormData(form) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Ошибка сервера");
+      result.innerHTML = renderMarkdownWithMath(data.answer);
+      renderMathInElement(result, {
+        delimiters: [
+          { left: "$$", right: "$$", display: true },
+          { left: "\\[", right: "\\]", display: true },
+          { left: "$", right: "$", display: false },
+          { left: "\\(", right: "\\)", display: false },
+        ],
+        throwOnError: false,
+      });
+    } catch (err) {
+      result.innerHTML = "";
+      const p = document.createElement("p");
+      p.className = "error";
+      p.textContent = err.message;
+      result.appendChild(p);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Решить";
+    }
+  });
+</script>
+</body>
+</html>
