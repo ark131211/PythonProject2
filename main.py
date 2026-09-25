@@ -1,50 +1,39 @@
-import base64
 import os
+import re
+from pathlib import Path
 
-import anthropic
 from flask import Flask, jsonify, render_template, request
 
-MODEL = "claude-opus-5"
-MAX_IMAGE_BYTES = 5 * 1024 * 1024
-ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+from mathnet.data import BLOCK_SIZE, STOI
+from mathnet.model import MathNet
 
-SYSTEM_PROMPT = """Ты — терпеливый репетитор по математике. Помогаешь решать задачи \
-любого уровня: арифметика, алгебра, геометрия, тригонометрия, анализ, вероятность, \
-линейная алгебра.
-
-Как отвечать:
-- Отвечай на языке пользователя (по умолчанию — по-русски).
-- Решай пошагово, коротко объясняя каждый шаг, чтобы ученик понял логику.
-- Формулы пиши в LaTeX: $...$ внутри строки, $$...$$ для отдельных строк.
-- Проверь ответ (подстановкой, оценкой или другим способом), если это возможно.
-- В конце выдели итог строкой «**Ответ:** ...».
-- Если условие неполное или неоднозначное — скажи, какое допущение делаешь."""
+WEIGHTS = Path(__file__).parent / "weights" / "mathnet.npz"
 
 app = Flask(__name__)
-client = anthropic.Anthropic()
+net = MathNet(WEIGHTS)
+
+REPLACEMENTS = {
+    "×": "*", "·": "*", "∙": "*", "÷": "/", ":": "/", "−": "-", "–": "-", "—": "-",
+    "²": "^2", "³": "^3", "х": "x", "**": "^",
+}
+WORDS = re.compile(r"(решите|решить|реши|уравнение|вычислите|вычисли|посчитайте|посчитай|"
+                   r"найдите|найди|сколько будет|чему равно|производную|производная|"
+                   r"функции|d/dx)", re.I)
 
 
-def build_content(text: str, image) -> list:
-    content = []
-    if image is not None and image.filename:
-        if image.mimetype not in ALLOWED_IMAGE_TYPES:
-            raise ValueError("Поддерживаются только PNG, JPEG, GIF и WEBP.")
-        data = image.read()
-        if len(data) > MAX_IMAGE_BYTES:
-            raise ValueError("Картинка больше 5 МБ.")
-        content.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": image.mimetype,
-                "data": base64.standard_b64encode(data).decode("utf-8"),
-            },
-        })
-    if text:
-        content.append({"type": "text", "text": text})
-    elif content:
-        content.append({"type": "text", "text": "Реши задачу на картинке."})
-    return content
+def normalize(text: str) -> str:
+    """Приводит ввод пользователя к формату, на котором обучена сеть."""
+    s = text.strip().lower()
+    for a, b in REPLACEMENTS.items():
+        s = s.replace(a, b)
+    if m := re.search(r"(\d+)\s*%\s*(?:от|из)?\s*(\d+)", s):
+        return f"{m[1]}% от {m[2]}"
+    is_derivative = bool(re.search(r"производн|d/dx", s)) or re.fullmatch(r"\s*\(.*\)'\s*", s)
+    s = WORDS.sub("", s)
+    s = re.sub(r"\s+", "", s).rstrip("?").removesuffix("=")
+    if is_derivative and not s.endswith("'"):
+        s = f"({s.strip('()')})'"
+    return s
 
 
 @app.get("/")
@@ -59,39 +48,18 @@ def healthz():
 
 @app.post("/api/solve")
 def solve():
-    text = (request.form.get("problem") or "").strip()
-    try:
-        content = build_content(text, request.files.get("image"))
-    except ValueError as e:
-        return jsonify(error=str(e)), 400
-    if not content:
-        return jsonify(error="Введите задачу или прикрепите фото."), 400
+    raw = (request.get_json(silent=True) or {}).get("problem", "")
+    problem = normalize(raw)
+    if not problem:
+        return jsonify(error="Введите задачу."), 400
+    bad = sorted({c for c in problem if c not in STOI or c in "?._"})
+    if bad:
+        return jsonify(error=f"Сеть не знает символы: {' '.join(bad)}"), 400
+    if len(problem) > BLOCK_SIZE // 2:
+        return jsonify(error="Слишком длинная задача."), 400
 
-    try:
-        response = client.beta.messages.create(
-            model=MODEL,
-            max_tokens=16000,
-            thinking={"type": "adaptive"},
-            output_config={"effort": "high"},
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": content}],
-        )
-    except anthropic.AuthenticationError:
-        return jsonify(error="Неверный ANTHROPIC_API_KEY на сервере."), 500
-    except anthropic.RateLimitError:
-        return jsonify(error="Слишком много запросов, попробуйте через минуту."), 429
-    except anthropic.APIStatusError as e:
-        return jsonify(error=f"Ошибка API ({e.status_code}): {e.message}"), 502
-    except anthropic.APIConnectionError:
-        return jsonify(error="Нет связи с API."), 502
-
-    if response.stop_reason == "refusal":
-        return jsonify(error="Модель отказалась отвечать на этот запрос."), 422
-
-    answer = "".join(b.text for b in response.content if b.type == "text")
-    return jsonify(answer=answer)
+    solution, confidence = net.solve(problem)
+    return jsonify(problem=problem, steps=solution.split(";"), confidence=confidence)
 
 
 if __name__ == "__main__":
