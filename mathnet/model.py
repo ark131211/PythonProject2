@@ -69,15 +69,19 @@ class MathNet:
         x = layer_norm(x, w["ln_f.weight"], w["ln_f.bias"])
         return x @ w["tok_emb"].T
 
-    def solve(self, problem: str) -> tuple[str, float]:
-        """Жадная генерация решения. Возвращает (решение, уверенность 0..1)."""
+    def solve(self, problem: str, temperature: float = 0.0, rng: np.random.Generator | None = None) -> tuple[str, float]:
+        """Генерация решения: жадно (temperature=0) или сэмплированием. Возвращает (решение, уверенность 0..1)."""
         ids = encode(problem + SEP)
         start, logp = len(ids), 0.0
         cache = [[None, None] for _ in range(self.n_layer)]
         logits = self.forward(np.array(ids), cache)
         while len(ids) < BLOCK_SIZE:
-            probs = softmax(logits[-1])
-            nxt = int(probs.argmax())
+            if temperature > 0:
+                probs = softmax(logits[-1] / temperature)
+                nxt = int((rng or np.random.default_rng()).choice(len(probs), p=probs))
+            else:
+                probs = softmax(logits[-1])
+                nxt = int(probs.argmax())
             logp += float(np.log(probs[nxt]))
             ids.append(nxt)
             if nxt == STOI[EOS]:

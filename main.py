@@ -9,9 +9,9 @@ for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
 from flask import Flask, jsonify, render_template, request
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from mathnet.data import BLOCK_SIZE, STOI
 from mathnet.model import MathNet
 from mathnet.ocr import OCRNet
+from mathnet.pipeline import SolverPool, solve_problem, step_tex
 
 WEIGHTS = Path(__file__).parent / "weights"
 
@@ -19,6 +19,7 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 net = MathNet(WEIGHTS / "mathnet.npz")
 ocr = OCRNet(WEIGHTS / "ocr.npz")
+pool = SolverPool()
 
 REPLACEMENTS = {
     "×": "*", "·": "*", "∙": "*", "÷": "/", "−": "-", "–": "-", "—": "-",
@@ -30,7 +31,9 @@ CONDITIONS = [  # задачи с параметром: фраза пользо�
     (r"один корень|единственн\w* (?:корень|решение)|одно решение", "один корень"),
     (r"нет корней|не имеет (?:корней|решений)|нет решений", "нет корней"),
     (r"два (?:различных )?(?:корня|решения)", "два корня"),
+    (r"(?:хотя бы один корень|имеет (?:корни|решения)|есть корни)", "есть корни"),
 ]
+NUMBERS = {"одно": 1, "один": 1, "два": 2, "две": 2, "три": 3, "четыре": 4, "пять": 5, "шесть": 6}
 
 
 def normalize(text: str) -> str:
@@ -39,11 +42,20 @@ def normalize(text: str) -> str:
     for a, b in REPLACEMENTS.items():
         s = s.replace(a, b)
     s = re.sub(r"(?<=[\d)])\s*:\s*(?=[\d(])", "/", s)  # 12:4 -> 12/4
+    s = re.sub(r"(?<=\d),(?=\d)", ".", s)                   # 0,5 -> 0.5
+    s = re.sub(r"\blg\s*([\dx]+)", r"log10(\1)", s)              # lg x -> log10(x)
+    s = re.sub(r"\blog(\d+)\s+([\dx]+)", r"log\1(\2)", s)       # log2 x -> log2(x)
+    s = re.sub(r"\bln\s*([\dx]+)", r"ln(\1)", s)
+    s = s.replace("tg", "tan").replace("ctan", "cot")
+    s = re.sub(r"\b(sin|cos|tan|cot)\s*([\dx]+)", r"\1(\2)", s)  # sin x -> sin(x)
     if m := re.search(r"(\d+)\s*%\s*(?:от|из)?\s*(\d+)", s):
         return f"{m[1]}% от {m[2]}"
     is_derivative = bool(re.search(r"производн|d/dx", s)) or re.fullmatch(r"\s*\(.*\)'\s*", s)
 
     suffix = ""
+    if m := re.search(r"ровно (\d+|" + "|".join(NUMBERS) + r")\s+\w*(?:решени|корн)\w*", s):
+        n = m[1] if m[1].isdigit() else NUMBERS[m[1]]
+        s, suffix = s[:m.start()] + " " + s[m.end():], f";ровно {n}"
     for pattern, cond in CONDITIONS:
         if re.search(pattern, s):
             s, suffix = re.sub(pattern, " ", s), ";" + cond
@@ -79,14 +91,12 @@ def solve():
     problem = normalize(raw)
     if not problem:
         return jsonify(error="Введите задачу."), 400
-    bad = sorted({c for c in problem if c not in STOI or c in "?._"})
-    if bad:
-        return jsonify(error=f"Сеть не знает символы: {' '.join(bad)}"), 400
-    if len(problem) > BLOCK_SIZE // 2:
+    if len(problem) > 200:
         return jsonify(error="Слишком длинная задача."), 400
-
-    solution, confidence = net.solve(problem)
-    return jsonify(problem=problem, steps=solution.split(";"), confidence=confidence)
+    body, _, cond = problem.partition(";")
+    result = solve_problem(problem, net, pool)
+    result["problem_tex"] = step_tex(body) + (rf"\quad\text{{({cond})}}" if cond else "")
+    return jsonify(result), (200 if result["source"] != "none" else 422)
 
 
 @app.post("/api/ocr")

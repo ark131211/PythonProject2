@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from .data import sample
+from .hw_data import render_hand
 
 SUP = Path("/System/Library/Fonts/Supplemental")
 SYS = Path("/System/Library/Fonts")
@@ -53,8 +54,7 @@ def font(path: Path, size: int):
     return ImageFont.truetype(str(path), size)
 
 
-def usable_fonts(paths):
-    need = "0123456789+=()x%от"
+def usable_fonts(paths, need="0123456789+=()x%от"):
     return [p for p in paths if p.exists() and all(has_glyph(p, c) for c in need)]
 
 
@@ -157,35 +157,57 @@ def draw_line(draw, xy, question, fpath, size, fill, spaced):
     return LineDrawer(draw, fpath, size, fill, spaced).text(question, xy[0], xy[1])
 
 
-def render(question: str, fonts) -> Image.Image:
-    fpath = random.choice(fonts)
-    size = random.randint(28, 60)
-    spaced = random.random() < 0.5
-    W, H = int(size * (len(question) + 4) * 1.1), int(size * 5)
-    bg, ink = random.randint(150, 255), random.randint(0, 90)
-    if bg - ink < 90:
-        ink = bg - 90
-
+def paper(W, H, size, bg):
+    """Фон: чистый лист, клетка или линейка."""
     img = Image.new("L", (W, H), bg)
     d = ImageDraw.Draw(img)
-    if random.random() < 0.2:  # тетрадная клетка
+    kind = random.random()
+    c = bg - random.randint(20, 60)
+    if kind < 0.2:  # клетка
         step = random.randint(int(size * 0.5), int(size * 1.0))
-        c = bg - random.randint(20, 60)
         off = random.randint(0, step)
         for gx in range(off, W, step):
             d.line([(gx, 0), (gx, H)], fill=c, width=1)
         for gy in range(off, H, step):
             d.line([(0, gy), (W, gy)], fill=c, width=1)
+    elif kind < 0.3:  # линейка
+        step = random.randint(int(size * 1.1), int(size * 1.6))
+        for gy in range(random.randint(0, step), H, step):
+            d.line([(0, gy), (W, gy)], fill=c, width=1)
+    return img
 
-    x0, y0 = size, int(size * 2)
-    x1 = draw_line(d, (x0, y0), question, fpath, size, ink, spaced)
-    bbox = (x0, y0 - int(size * 0.25), int(x1), y0 + int(size * 1.15))
 
-    if random.random() < 0.25:  # соседние строки текста, чуть заходящие в кадр
-        gap = size * random.uniform(1.25, 1.6)
-        for dy in (-gap, gap):
-            if random.random() < 0.6:
-                draw_line(d, (x0 + random.randint(-size, size), y0 + dy), sample()[0], fpath, size, ink, spaced)
+def render(question: str, fonts, hand: bool = False, val: bool = False) -> Image.Image:
+    """Картинка задачи: печатная (fonts) или рукописная (hand=True, символы разных людей)."""
+    bg = random.randint(150, 255)
+    ink = random.randint(0, 140 if hand else 90)  # синяя ручка на сером фото выглядит светлее
+    if bg - ink < 90:
+        ink = bg - 90
+
+    if hand:
+        mask, size = render_hand(question, val)
+        H, W = mask.shape
+        img = paper(W, H, size, bg)
+        a = np.asarray(img, np.float32)
+        a = a - (a - ink) * mask
+        img = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))
+        ys, xs = np.where(mask > 0.3)
+        bbox = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+    else:
+        fpath = random.choice(fonts)
+        size = random.randint(28, 60)
+        spaced = random.random() < 0.5
+        W, H = int(size * (len(question) + 4) * 1.1), int(size * 5)
+        img = paper(W, H, size, bg)
+        d = ImageDraw.Draw(img)
+        x0, y0 = size, int(size * 2)
+        x1 = draw_line(d, (x0, y0), question, fpath, size, ink, spaced)
+        bbox = (x0, y0 - int(size * 0.25), int(x1), y0 + int(size * 1.15))
+        if random.random() < 0.25:  # соседние строки текста, чуть заходящие в кадр
+            gap = size * random.uniform(1.25, 1.6)
+            for dy in (-gap, gap):
+                if random.random() < 0.6:
+                    draw_line(d, (x0 + random.randint(-size, size), y0 + dy), sample()[0], fpath, size, ink, spaced)
 
     m = lambda: int(size * random.uniform(0.0, 0.35))
     img = img.crop((max(bbox[0] - m(), 0), max(bbox[1] - m(), 0), min(bbox[2] + m(), W), min(bbox[3] + m(), H)))
@@ -224,8 +246,17 @@ def ocr_label(question: str) -> str:
     return question.split(";")[0].replace(" ", "")
 
 
-def ocr_sample(fonts):
-    q = ocr_label(sample()[0])
+HAND_FONTS = [SUP / "Bradley Hand Bold.ttf", SUP / "Chalkboard.ttc", SUP / "ChalkboardSE.ttc", SYS / "Noteworthy.ttc",
+              SYS / "MarkerFelt.ttc", SUP / "Comic Sans MS.ttf", SUP / "SignPainter.ttc", SUP / "Chalkduster.ttf",
+              SUP / "Apple Chancery.ttf", SUP / "Trattatello.ttf"]
+
+
+def ocr_sample(fonts, mode: str = "print", val: bool = False):
+    """mode: print — печатные шрифты, hand — символы от руки, handfont — рукописные шрифты."""
+    while True:
+        q = ocr_label(sample()[0])
+        if mode == "print" or "%" not in q:  # «от» от руки не рисуем
+            break
     if random.random() < 0.3 and "%" in q:
         q = q.replace("%от", "% от ")
-    return render(q, fonts), q.replace(" ", "")
+    return render(q, fonts, hand=(mode == "hand"), val=val), q.replace(" ", "")

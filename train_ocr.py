@@ -1,6 +1,6 @@
 """Обучение OCR-сети с нуля на синтетических картинках задач.
 
-    python train_ocr.py --steps 12000
+    python train_ocr.py --steps 20000
 
 Результат: weights/ocr.npz (+ .json) — их читает mathnet/ocr.py.
 """
@@ -18,11 +18,11 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, IterableDataset
 
 from mathnet.ocr import OCR_CHARS, OCRNet, ctc_greedy, prepare
-from mathnet.ocr_data import TRAIN_FONTS, VAL_FONTS, ocr_sample, usable_fonts
+from mathnet.ocr_data import HAND_FONTS, TRAIN_FONTS, VAL_FONTS, ocr_sample, usable_fonts
 
-CHANNELS = [32, 64, 96, 96, 128, 128]
+CHANNELS = [48, 96, 128, 128, 192, 192]
 POOLS = [(2, 2), (2, 2), (1, 1), (2, 1), (2, 1), (2, 1)]  # 32x320 -> 1x80
-SEQ = 192
+SEQ = 256
 N_CLASSES = len(OCR_CHARS) + 1
 C2I = {c: i + 1 for i, c in enumerate(OCR_CHARS)}
 
@@ -51,13 +51,17 @@ class CRNN(nn.Module):
         return self.head(x.transpose(1, 2))
 
 
+MODES = {"print": 0.45, "hand": 0.40, "handfont": 0.15}
+
+
 class Synth(IterableDataset):
-    def __init__(self, fonts):
-        self.fonts = fonts
+    def __init__(self, fonts, hand_fonts):
+        self.fonts = {"print": fonts, "hand": None, "handfont": hand_fonts}
 
     def __iter__(self):
         while True:
-            img, label = ocr_sample(self.fonts)
+            mode = random.choices(list(MODES), list(MODES.values()))[0]
+            img, label = ocr_sample(self.fonts[mode], mode)
             yield torch.from_numpy(prepare(img))[None], label
 
 
@@ -74,10 +78,10 @@ def seed_worker(i):
     np.random.seed(s)
 
 
-def make_val(fonts, n, seed):
+def make_val(fonts, n, seed, mode="print"):
     random.seed(seed)
     np.random.seed(seed)
-    items = [ocr_sample(fonts) for _ in range(n)]
+    items = [ocr_sample(fonts, mode, val=True) for _ in range(n)]
     return torch.from_numpy(np.stack([prepare(i) for i, _ in items]))[:, None], [l for _, l in items]
 
 
@@ -106,7 +110,7 @@ def export(model, path: Path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--steps", type=int, default=12000)
+    ap.add_argument("--steps", type=int, default=20000)
     ap.add_argument("--bs", type=int, default=128)
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--workers", type=int, default=8)
@@ -115,9 +119,10 @@ def main():
 
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
     train_fonts, val_fonts = usable_fonts(TRAIN_FONTS), usable_fonts(VAL_FONTS)
-    print(f"fonts: train={len(train_fonts)} val={len(val_fonts)}")
-    val_seen = make_val(train_fonts, 500, seed=1)
+    hand_fonts = usable_fonts(HAND_FONTS, need="0123456789+=()x")
+    print(f"fonts: train={len(train_fonts)} val={len(val_fonts)} hand={len(hand_fonts)}")
     val_unseen = make_val(val_fonts, 1000, seed=2)
+    val_hand = make_val(None, 1000, seed=3, mode="hand")  # почерк людей, которых нет в обучении
 
     torch.manual_seed(0)
     model = CRNN().to(device)
@@ -131,7 +136,7 @@ def main():
         t = (step - warmup) / max(1, args.steps - warmup)
         return args.lr * (0.02 + 0.98 * 0.5 * (1 + math.cos(math.pi * t)))
 
-    loader = DataLoader(Synth(train_fonts), batch_size=args.bs, num_workers=args.workers,
+    loader = DataLoader(Synth(train_fonts, hand_fonts), batch_size=args.bs, num_workers=args.workers,
                         collate_fn=collate, worker_init_fn=seed_worker, persistent_workers=True,
                         prefetch_factor=4)
     t0, out = time.time(), Path(args.out)
@@ -152,9 +157,9 @@ def main():
             print(f"step {step} loss {loss.item():.4f} lr {lr_at(step):.2e} "
                   f"{(time.time() - t0) / step * 1000:.0f}ms/step", flush=True)
         if step % 1500 == 0 or step == args.steps:
-            a1 = accuracy(model, device, *val_seen)
-            a2 = accuracy(model, device, *val_unseen)
-            print(f"  acc: seen_fonts={a1:.1%} unseen_fonts={a2:.1%}", flush=True)
+            a1 = accuracy(model, device, *val_unseen)
+            a2 = accuracy(model, device, *val_hand)
+            print(f"  acc: print_unseen_fonts={a1:.1%} handwriting_unseen_writers={a2:.1%}", flush=True)
             export(model, out)
         if step >= args.steps:
             break

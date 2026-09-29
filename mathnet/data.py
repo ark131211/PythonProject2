@@ -10,7 +10,7 @@ PAD = "_"
 SEP = "?"
 EOS = "."
 # Новые символы только дописываются в конец, чтобы старые веса оставались совместимы.
-CHARS = PAD + SEP + EOS + "0123456789+-*/^()=x';% отD" + "|√<>,yalog" + "динкреьйвая"
+CHARS = PAD + SEP + EOS + "0123456789+-*/^()=x';% отD" + "|√<>,yalog" + "динкреьйвая" + "t"
 STOI = {c: i for i, c in enumerate(CHARS)}
 ITOS = {i: c for i, c in enumerate(CHARS)}
 VOCAB_SIZE = len(CHARS)
@@ -361,6 +361,170 @@ def gen_param():
     return f"ax{signed(b)}={c};x={r}", ";".join(steps)
 
 
+
+# ---------------------------------------------------------------- типы, найденные на реальных задачах
+
+def nz(lo=-9, hi=9):
+    return random.choice([i for i in range(lo, hi + 1) if i != 0])
+
+
+def gen_linear_both():
+    """ax+b=cx+d, иногда со скобками k(x+m)=cx+d."""
+    while True:
+        a_, c = nz(), nz()
+        if a_ != c:
+            break
+    x0 = random.randint(-12, 12)
+    steps = []
+    if random.random() < 0.4:
+        k, m = nz(-6, 6), nz()
+        if k == c:
+            return gen_linear_both()
+        a_, b = k, k * m
+        d = (a_ - c) * x0 + b
+        lhs = f"{k}(x{signed(m)})" if k != 1 else f"(x{signed(m)})"
+        lhs = "-" + lhs[2:] if lhs.startswith("-1(") else lhs
+        steps.append(f"{poly([(a_, 'x'), (b, '')])}={poly([(c, 'x'), (d, '')])}")
+    else:
+        b = random.randint(-20, 20)
+        d = (a_ - c) * x0 + b
+        lhs = poly([(a_, "x"), (b, "")])
+    rhs = poly([(c, "x"), (d, "")])
+    k = a_ - c
+    steps.append(f"{term(a_, 'x', True)}{term(-c, 'x', False)}={d}{signed(-b)}" if b else f"{term(a_, 'x', True)}{term(-c, 'x', False)}={d}")
+    steps.append(f"{term(k, 'x', True)}={d - b}")
+    if k != 1:
+        steps.append(f"x={x0}")
+    return f"{lhs}={rhs}", ";".join(steps)
+
+
+def gen_linear_frac():
+    """kx/m=c."""
+    m = random.randint(2, 9)
+    k = nz(-9, 9)
+    x0 = m * random.randint(-9, 9) // math.gcd(k, m) if random.random() < 0.5 else m * random.randint(-5, 5)
+    c = k * x0 // m
+    if k * x0 % m:
+        return gen_linear_frac()
+    lhs = f"{term(k, 'x', True)}/{m}"
+    steps = [f"{term(k, 'x', True)}={c}*{m}", f"{term(k, 'x', True)}={c * m}"]
+    if k != 1:
+        steps.append(f"x={x0}")
+    return f"{lhs}={c}", ";".join(steps)
+
+
+def gen_quadratic_special():
+    """Неполные квадратные, D<0, произведение скобок."""
+    kind = random.randint(0, 3)
+    if kind == 0:  # ax^2=c или ax^2-c=0
+        A, r = random.choice([1, 1, 2, 3]), random.randint(1, 12)
+        if random.random() < 0.5:
+            return f"{term(A, 'x^2', True)}={A * r * r}", ";".join(([] if A == 1 else [f"x^2={r * r}"]) + [f"x={r}", f"x={-r}"])
+        first = [] if A == 1 else [f"{term(A, 'x^2', True)}={A * r * r}"]
+        return f"{term(A, 'x^2', True)}-{A * r * r}=0", ";".join(first + [f"x^2={r * r}", f"x={r}", f"x={-r}"])
+    if kind == 1:  # ax^2+bx=0
+        A, r = random.choice([1, 1, 2, 3, -1]), nz(-12, 12)
+        B = -A * r
+        eq = poly([(A, "x^2"), (B, "x")]) + "=0"
+        inner = poly([(A, "x"), (B, "")])
+        return eq, f"x({inner})=0;x=0;{inner}=0;x={r}"
+    if kind == 2:  # D<0
+        while True:
+            p, q = random.randint(-9, 9), random.randint(1, 30)
+            if p * p - 4 * q < 0:
+                break
+        four_q = 4 * q
+        return poly([(1, "x^2"), (p, "x"), (q, "")]) + "=0", f"D={p * p}-{four_q}={p * p - four_q}<0;нет корней"
+    r1, r2 = nz(-12, 12), nz(-12, 12)  # (x-r1)(x-r2)=0
+    f1, f2 = poly([(1, "x"), (-r1, "")]), poly([(1, "x"), (-r2, "")])
+    return f"({f1})({f2})=0", f"{f1}=0;x={r1};{f2}=0;x={r2}"
+
+
+def gen_biquadratic():
+    """x^4+px^2+q=0 через t=x^2."""
+    t1, t2 = random.choice([1, 4, 9, 16, 25, -1, -4]), random.choice([1, 4, 9, 16, 36, -4, -9])
+    p, q = -(t1 + t2), t1 * t2
+    eq = poly([(1, "x^4"), (p, "x^2"), (q, "")]) + "=0"
+    qs, roots = quad_steps(p, q)
+    qs = [st.replace("x1", "t1").replace("x2", "t2").replace("x=", "t=") for st in qs]
+    steps = ["t=x^2", poly([(1, "t^2"), (p, "t"), (q, "")]) + "=0"] + qs
+    xs = []
+    for t in roots:
+        if t < 0:
+            steps.append(f"x^2={t}<0")
+        else:
+            r = math.isqrt(t)
+            xs += [r, -r] if r else [0]
+    steps += [f"x={v}" for v in dict.fromkeys(xs)] or [NO_ROOTS]
+    return eq, ";".join(steps)
+
+
+def gen_quad_ineq():
+    """x^2+px+q>0 методом интервалов."""
+    while True:
+        r1, r2 = random.randint(-9, 9), random.randint(-9, 9)
+        if r1 != r2:
+            break
+    lo, hi = min(r1, r2), max(r1, r2)
+    p, q = -(r1 + r2), r1 * r2
+    op = random.choice(["<", ">", "<=", ">="])
+    steps = quad_steps(p, q)[0]
+    if op in (">", ">="):
+        steps += [f"x{FLIP[op]}{lo}", f"x{op}{hi}"]
+    else:
+        steps += [f"{lo}{op}x{op}{hi}"]
+    return poly([(1, "x^2"), (p, "x"), (q, "")]) + f"{op}0", ";".join(steps)
+
+
+def gen_log_sum_eq():
+    """log_b(x)+log_b(x+k)=n с ОДЗ и отбором корней."""
+    b = random.choice([2, 3])
+    n = random.randint(1, {2: 5, 3: 3}[b])
+    N = b ** n
+    i = random.randint(0, n)
+    r1, r2 = b ** i, -(b ** (n - i))
+    k = -(r1 + r2)
+    lo = max(0, -k)
+    inner = poly([(1, "x"), (k, "")])
+    steps = [f"x>{lo}", f"log{b}(x({inner}))={n}", f"{poly([(1, 'x^2'), (k, 'x')])}={N}",
+             f"{poly([(1, 'x^2'), (k, 'x'), (-N, '')])}=0"]
+    qs, roots = quad_steps(k, -N)
+    steps += qs
+    good = [r for r in roots if r > lo]
+    steps += [f"x={r}" for r in good] or [NO_ROOTS]
+    return f"log{b}(x)+log{b}({inner})={n}", ";".join(steps)
+
+
+def gen_abs_abs():
+    """|x+b|=|cx+d| (целые корни)."""
+    while True:
+        c, b, d = nz(-3, 3), random.randint(-9, 9), random.randint(-9, 9)
+        if c == 1 or c == -1:
+            continue
+        # x+b = cx+d -> x(1-c)=d-b ; x+b = -(cx+d) -> x(1+c)=-d-b
+        if (d - b) % (1 - c) == 0 and (-d - b) % (1 + c) == 0:
+            break
+    x1, x2 = (d - b) // (1 - c), (-d - b) // (1 + c)
+    l, r = poly([(1, "x"), (b, "")]), poly([(c, "x"), (d, "")])
+    steps = [f"{l}={r}", f"{term(1 - c, 'x', True)}={d - b}", f"x={x1}",
+             f"{l}=-({r})", f"{term(1 + c, 'x', True)}={-d - b}", f"x={x2}"]
+    return f"|{l}|=|{r}|", ";".join(steps)
+
+
+def gen_fractions():
+    """a/b±c/d через общий знаменатель."""
+    b, d = random.randint(2, 12), random.randint(2, 12)
+    a_, c = random.randint(1, b * 2), random.randint(1, d * 2)
+    op = random.choice("+-")
+    L = b * d // math.gcd(b, d)
+    A, C = a_ * (L // b), c * (L // d)
+    num = A + C if op == "+" else A - C
+    g = math.gcd(abs(num), L) or 1
+    res = f"{num // g}/{L // g}" if L // g != 1 else f"{num // g}"
+    first = f"{A}/{L}{op}{C}/{L}={num}/{L}"
+    return f"{a_}/{b}{op}{c}/{d}", first if res == f"{num}/{L}" else f"{first}={res}"
+
+
 TASKS = {
     "addsub": (gen_addsub, 0.10),
     "mul": (gen_mul, 0.07),
@@ -379,6 +543,14 @@ TASKS = {
     "ineq": (gen_ineq, 0.06),
     "system": (gen_system, 0.07),
     "param": (gen_param, 0.10),
+    "linear_both": (gen_linear_both, 0.07),
+    "linear_frac": (gen_linear_frac, 0.03),
+    "quadratic_special": (gen_quadratic_special, 0.07),
+    "biquadratic": (gen_biquadratic, 0.05),
+    "quad_ineq": (gen_quad_ineq, 0.05),
+    "log_sum_eq": (gen_log_sum_eq, 0.05),
+    "abs_abs": (gen_abs_abs, 0.04),
+    "fractions": (gen_fractions, 0.04),
 }
 
 
