@@ -114,9 +114,17 @@ def evaluate(model, device, n=200):
 
 
 def load_weights(model, path: Path):
-    sd = {("tok_emb.weight" if k == "tok_emb" else k): torch.from_numpy(v.astype(np.float32))
-          for k, v in np.load(path).items()}
-    model.load_state_dict(sd)
+    """Загружает веса; если словарь или контекст выросли — копирует пересекающуюся часть."""
+    own = model.state_dict()
+    for k, v in np.load(path).items():
+        k = "tok_emb.weight" if k == "tok_emb" else k
+        v = torch.from_numpy(v.astype(np.float32))
+        if v.shape != own[k].shape:
+            print(f"  {k}: {tuple(v.shape)} -> {tuple(own[k].shape)} (новые строки — случайные)")
+            own[k][: v.shape[0]] = v
+        else:
+            own[k] = v
+    model.load_state_dict(own)
 
 
 def export(model, cfg, path: Path):

@@ -16,16 +16,23 @@
     p.sub { color:var(--muted); margin:0 0 20px; }
     .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; }
     form { display:flex; gap:8px; }
-    input { flex:1; min-width:0; padding:10px 12px; border:1px solid var(--border); border-radius:8px;
+    input[type=text] { flex:1; min-width:0; padding:10px 12px; border:1px solid var(--border); border-radius:8px;
       background:var(--bg); color:var(--text); font:18px ui-monospace, Menlo, monospace; }
-    button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 18px; font:inherit; cursor:pointer; }
+    button, .btn { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 18px; font:inherit;
+      cursor:pointer; white-space:nowrap; }
+    .btn.secondary { background:transparent; color:var(--accent); border:1px solid var(--accent); }
     .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
     .chip { background:transparent; color:var(--muted); border:1px solid var(--border); padding:4px 10px;
       font:13px ui-monospace, Menlo, monospace; border-radius:999px; }
+    #photo { margin-top:16px; }
+    #photo[hidden] { display:none; }
+    .hint { color:var(--muted); font-size:.85rem; margin:0 0 8px; }
+    #canvas { display:block; max-width:100%; border-radius:8px; touch-action:none; cursor:crosshair; }
+    .row { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
     #result { margin-top:16px; }
     #result:empty { display:none; }
     .problem { color:var(--muted); font-size:.9rem; margin-bottom:8px; }
-    ol { margin:0; padding-left:24px; font:18px/1.9 ui-monospace, Menlo, monospace; }
+    ol { margin:0; padding-left:24px; font:18px/1.9 ui-monospace, Menlo, monospace; overflow-wrap:anywhere; }
     li:last-child { font-weight:700; }
     .conf { margin-top:10px; font-size:.85rem; }
     .error { color:#dc2626; }
@@ -34,18 +41,32 @@
 <body>
 <main>
   <h1>MathNet</h1>
-  <p class="sub">Собственная нейросеть-трансформер (4.8M параметров), обученная с нуля решать задачи по шагам.</p>
+  <p class="sub">Две собственные нейросети, обученные с нуля: одна читает задачу с фото, другая решает её по шагам.</p>
   <div class="card">
     <form id="form">
-      <input id="problem" autocomplete="off" placeholder="x^2-5x+6=0" required>
+      <input type="text" id="problem" autocomplete="off" placeholder="При каком a уравнение x^2+ax+9=0 имеет один корень?" required>
+      <label class="btn secondary" for="file">Фото</label>
       <button>Решить</button>
     </form>
+    <input type="file" id="file" accept="image/*" hidden>
     <div class="chips" id="chips"></div>
   </div>
+
+  <div id="photo" class="card" hidden>
+    <p class="hint">Выделите пальцем или мышкой одну строку с задачей. Без выделения распознаётся весь снимок.</p>
+    <canvas id="canvas"></canvas>
+    <div class="row">
+      <button type="button" id="read">Распознать и решить</button>
+      <button type="button" class="btn secondary" id="close">Закрыть</button>
+    </div>
+  </div>
+
   <div id="result" class="card"></div>
 </main>
 <script>
-  const examples = ["x^2-5x+6=0", "3x+7=22", "47*36", "358+467", "(12+8)*3", "25% от 480", "(3x^3-2x^2+x-5)'", "84/7"];
+  const examples = ["x^2-5x+6=0", "2x^2+10x-12=0", "|2x-4|=6", "√(x+13)=x+1", "log2(3x+1)=4", "log6(4)+log6(9)",
+    "2^(x+1)=16", "3x-5>7", "x+y=5, x-y=1", "x^2+ax+9=0, один корень", "x^2+6x+a=0, нет корней",
+    "47*36", "25% от 480", "(3x^3-2x^2+x-5)'"];
   const input = document.getElementById("problem");
   const result = document.getElementById("result");
   const chips = document.getElementById("chips");
@@ -63,27 +84,111 @@
     return e;
   }
 
-  async function solve() {
-    result.replaceChildren(el("span", "problem", "Считаю…"));
+  async function postJSON(url, body) {
+    const res = await fetch(url, body);
+    const data = await res.json().catch(() => ({ error: "Ошибка сервера" }));
+    if (!res.ok) throw new Error(data.error || "Ошибка сервера");
+    return data;
+  }
+
+  function confidence(label, value) {
+    const pct = Math.round(value * 100);
+    const div = el("div", "conf", `${label}: ${pct}%`);
+    div.style.color = pct >= 80 ? "var(--ok)" : "var(--warn)";
+    return div;
+  }
+
+  async function solve(extra = []) {
+    result.replaceChildren(...extra, el("span", "problem", "Считаю…"));
     try {
-      const res = await fetch("/api/solve", {
+      const data = await postJSON("/api/solve", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ problem: input.value }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Ошибка сервера");
       const ol = el("ol");
       data.steps.forEach(s => ol.appendChild(el("li", "", s)));
-      const pct = Math.round(data.confidence * 100);
-      const conf = el("div", "conf", `Уверенность сети: ${pct}%`);
-      conf.style.color = pct >= 80 ? "var(--ok)" : "var(--warn)";
-      result.replaceChildren(el("div", "problem", "Задача: " + data.problem), ol, conf);
+      result.replaceChildren(...extra, el("div", "problem", "Задача: " + data.problem), ol,
+        confidence("Уверенность сети", data.confidence));
     } catch (err) {
-      result.replaceChildren(el("p", "error", err.message));
+      result.replaceChildren(...extra, el("p", "error", err.message));
     }
   }
 
   document.getElementById("form").addEventListener("submit", e => { e.preventDefault(); solve(); });
+
+  // ---- фото: загрузка, выделение строки, распознавание
+  const photo = document.getElementById("photo");
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d");
+  const MAX_SIDE = 2000;  // уменьшаем огромные снимки перед отправкой
+  let image = null, sel = null, drag = null;
+
+  document.getElementById("file").addEventListener("change", e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const img = new Image();
+    img.onload = () => {
+      image = img; sel = null;
+      const scale = Math.min(1, MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+      canvas.width = Math.round(img.naturalWidth * scale);
+      canvas.height = Math.round(img.naturalHeight * scale);
+      photo.hidden = false;
+      draw();
+      URL.revokeObjectURL(img.src);
+    };
+    img.src = URL.createObjectURL(file);
+    e.target.value = "";
+  });
+
+  function draw() {
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    if (!sel) return;
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(image, sel.x * image.naturalWidth / canvas.width, sel.y * image.naturalHeight / canvas.height,
+      sel.w * image.naturalWidth / canvas.width, sel.h * image.naturalHeight / canvas.height, sel.x, sel.y, sel.w, sel.h);
+    ctx.strokeStyle = "#818cf8"; ctx.lineWidth = Math.max(2, canvas.width / 300);
+    ctx.strokeRect(sel.x, sel.y, sel.w, sel.h);
+  }
+
+  function point(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * canvas.width / r.width, y: (e.clientY - r.top) * canvas.height / r.height };
+  }
+  canvas.addEventListener("pointerdown", e => { drag = point(e); canvas.setPointerCapture(e.pointerId); });
+  canvas.addEventListener("pointermove", e => {
+    if (!drag) return;
+    const p = point(e);
+    sel = { x: Math.min(drag.x, p.x), y: Math.min(drag.y, p.y), w: Math.abs(p.x - drag.x), h: Math.abs(p.y - drag.y) };
+    draw();
+  });
+  canvas.addEventListener("pointerup", () => {
+    drag = null;
+    if (sel && (sel.w < 8 || sel.h < 8)) { sel = null; draw(); }
+  });
+
+  document.getElementById("close").onclick = () => { photo.hidden = true; image = null; };
+
+  document.getElementById("read").onclick = async () => {
+    if (!image) return;
+    const r = sel || { x: 0, y: 0, w: canvas.width, h: canvas.height };
+    const out = document.createElement("canvas");
+    out.width = Math.round(r.w); out.height = Math.round(r.h);
+    out.getContext("2d").drawImage(image, r.x * image.naturalWidth / canvas.width, r.y * image.naturalHeight / canvas.height,
+      r.w * image.naturalWidth / canvas.width, r.h * image.naturalHeight / canvas.height, 0, 0, out.width, out.height);
+    result.replaceChildren(el("span", "problem", "Читаю фото…"));
+    try {
+      const blob = await new Promise(res => out.toBlob(res, "image/png"));
+      const form = new FormData();
+      form.append("image", blob, "crop.png");
+      const data = await postJSON("/api/ocr", { method: "POST", body: form });
+      input.value = data.text;
+      const note = el("div", "problem", "С фото прочитано: " + data.text + " — если что-то не так, поправьте в поле и нажмите «Решить».");
+      await solve([note, confidence("Уверенность распознавания", data.confidence)]);
+    } catch (err) {
+      result.replaceChildren(el("p", "error", err.message));
+    }
+  };
 </script>
 </body>
 </html>
