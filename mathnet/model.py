@@ -37,21 +37,30 @@ class MathNet:
         self.n_layer, self.n_head = cfg["n_layer"], cfg["n_head"]
         self.mask = np.triu(np.full((BLOCK_SIZE, BLOCK_SIZE), -np.inf, np.float32), 1)
 
-    def forward(self, ids: np.ndarray) -> np.ndarray:
-        """ids: (T,) -> логиты (T, vocab)."""
+    def forward(self, ids: np.ndarray, cache: list | None = None) -> np.ndarray:
+        """ids: (T,) новых токенов -> логиты (T, vocab).
+
+        cache — список [k, v] по слоям с ключами/значениями уже обработанных
+        позиций (KV-кэш); дополняется на месте. Без кэша считаем с нуля.
+        """
         w, T = self.w, len(ids)
-        x = w["tok_emb"][ids] + w["pos_emb"][:T]
+        if cache is None:
+            cache = [[None, None] for _ in range(self.n_layer)]
+        past = 0 if cache[0][0] is None else cache[0][0].shape[1]
+        x = w["tok_emb"][ids] + w["pos_emb"][past:past + T]
         C = x.shape[-1]
         hs = C // self.n_head
         for i in range(self.n_layer):
             p = f"blocks.{i}."
             h = layer_norm(x, w[p + "ln1.weight"], w[p + "ln1.bias"])
             qkv = h @ w[p + "attn.weight"].T + w[p + "attn.bias"]
-            q, k, v = np.split(qkv, 3, axis=-1)
-            q = q.reshape(T, self.n_head, hs).transpose(1, 0, 2)
-            k = k.reshape(T, self.n_head, hs).transpose(1, 0, 2)
-            v = v.reshape(T, self.n_head, hs).transpose(1, 0, 2)
-            att = q @ k.transpose(0, 2, 1) / np.sqrt(hs) + self.mask[:T, :T]
+            q, k, v = (t.reshape(T, self.n_head, hs).transpose(1, 0, 2)
+                       for t in np.split(qkv, 3, axis=-1))
+            if cache[i][0] is not None:
+                k = np.concatenate([cache[i][0], k], axis=1)
+                v = np.concatenate([cache[i][1], v], axis=1)
+            cache[i] = [k, v]
+            att = q @ k.transpose(0, 2, 1) / np.sqrt(hs) + self.mask[past:past + T, :past + T]
             y = (softmax(att) @ v).transpose(1, 0, 2).reshape(T, C)
             x = x + y @ w[p + "proj.weight"].T + w[p + "proj.bias"]
             h = layer_norm(x, w[p + "ln2.weight"], w[p + "ln2.bias"])
@@ -64,12 +73,15 @@ class MathNet:
         """Жадная генерация решения. Возвращает (решение, уверенность 0..1)."""
         ids = encode(problem + SEP)
         start, logp = len(ids), 0.0
+        cache = [[None, None] for _ in range(self.n_layer)]
+        logits = self.forward(np.array(ids), cache)
         while len(ids) < BLOCK_SIZE:
-            probs = softmax(self.forward(np.array(ids))[-1])
+            probs = softmax(logits[-1])
             nxt = int(probs.argmax())
             logp += float(np.log(probs[nxt]))
             ids.append(nxt)
             if nxt == STOI[EOS]:
                 break
+            logits = self.forward(np.array([nxt]), cache)
         out = decode(ids[start:]).rstrip(EOS)
         return out, float(np.exp(logp))

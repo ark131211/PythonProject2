@@ -2,6 +2,10 @@ import os
 import re
 from pathlib import Path
 
+# Модель маленькая: многопоточный BLAS на слабом CPU только тормозит.
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
 from flask import Flask, jsonify, render_template, request
 
 from mathnet.data import BLOCK_SIZE, STOI
